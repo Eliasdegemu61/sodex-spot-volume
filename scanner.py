@@ -8,11 +8,20 @@ getcontext().prec = 50
 
 # --- CONFIG ---
 START_ID = 1000
-END_ID = 5000               # The "Upper Limit" we found
-NUM_CHUNKS = 10             # Divide the work into 10 threads
+END_ID = 8000               # Increased limit since we now have a circuit breaker
+MAX_THREADS = 10
+ZERO_FEE_STOP_LIMIT = 100   # Stop if 100 consecutive users have 0 fees
 ADDRESS_URL = "https://sodex.dev/mainnet/chain/user/{}/address"
 TRADE_URL = "https://mainnet-data.sodex.dev/api/v1/spot/trades"
 OUT_FILE = "spot_market_stats.json"
+
+# Global counter to track consecutive zero-fee users across threads
+class GlobalTracker:
+    def __init__(self):
+        self.consecutive_zeros = 0
+        self.stop_signal = False
+
+tracker = GlobalTracker()
 
 def get_market_prices():
     try:
@@ -23,73 +32,69 @@ def get_market_prices():
         return {s_id: price_map.get(name, Decimal('0')) for s_id, name in id_map.items()}
     except: return {}
 
-def scan_range(start, end, price_map):
-    """Function given to each thread to scan its specific 10% chunk."""
-    chunk_results = {}
-    print(f"🧵 Thread started for range: {start} - {end}")
-    
-    for curr_id in range(start, end + 1):
-        try:
-            resp = requests.get(ADDRESS_URL.format(curr_id), timeout=10).json()
-            if resp.get("code") != 0: continue 
-            
-            addr = resp["data"]["address"]
-            vol, fees = Decimal('0'), Decimal('0')
-            off, lim = 0, 100
-            user_trades = 0
-            
-            while True:
-                r = requests.get(f"{TRADE_URL}?account_id={curr_id}&limit={lim}&offset={off}", timeout=10).json()
-                trades = r.get('data', [])
-                if not trades: break
-                
-                user_trades += len(trades)
-                for t in trades:
-                    p = price_map.get(str(t['symbol_id'])) or Decimal(str(t.get('price', '0')))
-                    vol += (Decimal(str(t['quantity'])) * p)
-                    fees += (Decimal(str(t['fee'])) * p) if int(t.get('side', 1)) == 1 else Decimal(str(t['fee']))
-                
-                off += lim
-                if len(trades) < lim: break
-            
-            if user_trades > 0:
-                chunk_results[addr] = {
-                    "id": curr_id, "vol": float(round(vol, 2)), 
-                    "fee": float(round(fees, 4)), "ts": int(time.time())
-                }
-                print(f"✅ Chunk Found: {curr_id} (${round(vol, 2)})", flush=True)
+def process_id(uid, price_map):
+    if tracker.stop_signal: return None
 
-        except: continue
-    return chunk_results
+    try:
+        resp = requests.get(ADDRESS_URL.format(uid), timeout=5).json()
+        if resp.get("code") != 0: return "SKIP"
+            
+        addr = resp["data"]["address"]
+        vol, fees, trades_found = Decimal('0'), Decimal('0'), 0
+        offset, limit = 0, 100
+        
+        while True:
+            r = requests.get(f"{TRADE_URL}?account_id={uid}&limit={limit}&offset={offset}", timeout=10).json()
+            trades = r.get('data', [])
+            if not trades: break
+            
+            trades_found += len(trades)
+            for t in trades:
+                p = price_map.get(str(t['symbol_id'])) or Decimal(str(t.get('price', '0')))
+                vol += (Decimal(str(t['quantity'])) * p)
+                fees += (Decimal(str(t['fee'])) * p) if int(t.get('side', 1)) == 1 else Decimal(str(t['fee']))
+            
+            offset += limit
+            if len(trades) < limit: break
+            
+        # --- CIRCUIT BREAKER LOGIC ---
+        if fees == 0:
+            tracker.consecutive_zeros += 1
+            if tracker.consecutive_zeros >= ZERO_FEE_STOP_LIMIT:
+                print(f"🛑 CIRCUIT BREAKER: {ZERO_FEE_STOP_LIMIT} users with 0 fees. Stopping.")
+                tracker.stop_signal = True
+        else:
+            tracker.consecutive_zeros = 0 # Reset streak if we find a real payer
+
+        if trades_found > 0:
+            return {"addr": addr, "id": uid, "vol": float(round(vol, 2)), "fee": float(round(fees, 4))}
+            
+    except: pass
+    return None
 
 def main():
     prices = get_market_prices()
-    all_results = {}
+    final_results = {}
     
-    # 1. Calculate the chunks
-    total_range = END_ID - START_ID
-    chunk_size = total_range // NUM_CHUNKS
+    print(f"🚀 Scanning IDs {START_ID} to {END_ID} with 0-fee Circuit Breaker...")
     
-    ranges = []
-    for i in range(NUM_CHUNKS):
-        s = START_ID + (i * chunk_size)
-        # Ensure the last chunk goes all the way to END_ID
-        e = (START_ID + (i + 1) * chunk_size - 1) if i < NUM_CHUNKS - 1 else END_ID
-        ranges.append((s, e))
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        # Process sequentially in small batches of 10 to check the circuit breaker regularly
+        for i in range(START_ID, END_ID + 1, MAX_THREADS):
+            if tracker.stop_signal: break
+            
+            batch = range(i, min(i + MAX_THREADS, END_ID + 1))
+            futures = [executor.submit(process_id, uid, prices) for uid in batch]
+            
+            for f in futures:
+                res = f.result()
+                if res and res != "SKIP":
+                    final_results[res["addr"]] = {"id": res["id"], "vol": res["vol"], "fee": res["fee"], "ts": int(time.time())}
+                    print(f"✅ {res['id']} | Fees: ${res['fee']}")
 
-    # 2. Launch Threads
-    print(f"🚀 Launching {NUM_CHUNKS} threads to scan 10% of the IDs each...")
-    with ThreadPoolExecutor(max_workers=NUM_CHUNKS) as executor:
-        future_to_range = {executor.submit(scan_range, r[0], r[1], prices): r for r in ranges}
-        
-        for future in future_to_range:
-            chunk_data = future.result()
-            all_results.update(chunk_data) # Merge the 10% into the final list
-
-    # 3. Save Final JSON
     with open(OUT_FILE, "w") as f:
-        json.dump(all_results, f, indent=4)
-    print(f"💾 Success! Combined all chunks. Total users: {len(all_results)}")
+        json.dump(final_results, f, indent=4)
+    print(f"💾 Saved {len(final_results)} users. Scan ended at ID {tracker.consecutive_zeros + START_ID if tracker.stop_signal else END_ID}")
 
 if __name__ == "__main__":
     main()
