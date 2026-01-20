@@ -1,19 +1,17 @@
 import requests
 import json
 import time
-import sys
 from decimal import Decimal, getcontext
 
 getcontext().prec = 50
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 START_ID = 1000
 ADDRESS_API = "https://sodex.dev/mainnet/chain/user/"
 TRADE_URL = "https://mainnet-data.sodex.dev/api/v1/spot/trades"
 OUT_FILE = "spot_market_stats.json"
 
 def get_user_address_only(user_id):
-    """Checks if ID exists and returns address (Matches your Google Script logic)"""
     try:
         url = f"{ADDRESS_API}{user_id}/address"
         response = requests.get(url, timeout=5)
@@ -21,29 +19,17 @@ def get_user_address_only(user_id):
             data = response.json()
             if data.get("code") == 0 and data.get("data") and data["data"].get("address"):
                 return data["data"]["address"]
-    except:
-        pass
+    except: pass
     return None
 
 def find_upper_limit():
-    """Exact translation of your Google Script Binary Search"""
-    print("🔍 [STEP 1] HUNTING UPPER LIMIT...", flush=True)
-    low = 1000
-    high = 20000  # Increased range just in case
-    upper_limit = 1000
-    
+    low, high, upper_limit = 1000, 20000, 1000
     while low <= high:
         mid = (low + high) // 2
-        address = get_user_address_only(mid)
-        
-        if address:
-            upper_limit = mid
-            low = mid + 1
+        if get_user_address_only(mid):
+            upper_limit, low = mid, mid + 1
         else:
             high = mid - 1
-        time.sleep(0.06) # Your API_DELAY
-    
-    print(f"🎯 UPPER LIMIT FOUND: {upper_limit}", flush=True)
     return upper_limit
 
 def get_market_prices():
@@ -60,19 +46,19 @@ def main():
     active_prices = get_market_prices()
     results = {}
 
-    print(f"🚀 [STEP 2] STARTING REAL-TIME TRACKING (IDs {START_ID} to {upper_limit})", flush=True)
-    print("-" * 50, flush=True)
+    print(f"🎯 UPPER LIMIT: {upper_limit}. Starting Deep Sync...", flush=True)
 
     for uid in range(START_ID, upper_limit + 1):
-        try:
-            addr = get_user_address_only(uid)
-            if not addr:
-                continue
-            
-            vol, fees, trades_found = Decimal('0'), Decimal('0'), 0
-            offset, limit = 0, 100
-            
-            while True:
+        addr = get_user_address_only(uid)
+        if not addr: continue
+        
+        # --- Real-time "I am starting this user" log ---
+        print(f"📡 Fetching ID {uid}...", end="", flush=True)
+        
+        vol, fees, trades_found, offset, limit = Decimal('0'), Decimal('0'), 0, 0, 100
+        
+        while True:
+            try:
                 r = requests.get(f"{TRADE_URL}?account_id={uid}&limit={limit}&offset={offset}", timeout=10).json()
                 trades = r.get('data', [])
                 if not trades: break
@@ -83,30 +69,29 @@ def main():
                     vol += (Decimal(str(t['quantity'])) * p)
                     fees += (Decimal(str(t['fee'])) * p) if int(t.get('side', 1)) == 1 else Decimal(str(t['fee']))
                 
+                # --- HEARTBEAT PRINT ---
+                # This shows you it's still working on a "heavy" user
+                print(".", end="", flush=True) 
+                
                 offset += limit
                 if len(trades) < limit: break
-            
-            if trades_found > 0:
-                # SKIP TEAM ADDRESSES
-                if fees == 0:
-                    print(f"⏩ SKIP | ID: {uid} | Addr: {addr[:10]}... | Reason: Team/Zero Fee", flush=True)
-                    continue
-                
-                results[addr] = {
-                    "id": uid, "vol": float(round(vol, 2)), 
-                    "fee": float(round(fees, 4)), "ts": int(time.time())
-                }
-                # This is what you'll see live in GitHub
-                print(f"✅ TRACKING | ID: {uid} | Vol: ${round(vol, 2)} | Fees: ${round(fees, 4)}", flush=True)
+            except: 
+                print("⚠️", end="", flush=True)
+                break
 
-        except Exception as e:
-            print(f"⚠️ Error on ID {uid}: {e}", flush=True)
+        # Final result for the user
+        if trades_found > 0:
+            if fees == 0:
+                print(f" ⏩ Skip (Team)", flush=True)
+            else:
+                results[addr] = {"id": uid, "vol": float(round(vol, 2)), "fee": float(round(fees, 4)), "ts": int(time.time())}
+                print(f" ✅ Vol: ${round(vol, 2)}", flush=True)
+        else:
+            print(" 💨 No trades", flush=True)
 
-    # Final Save
     with open(OUT_FILE, "w") as f:
         json.dump(results, f, indent=4)
-    print("-" * 50, flush=True)
-    print(f"🏁 DONE! Total real addresses tracked: {len(results)}", flush=True)
+    print("🏁 Done!")
 
 if __name__ == "__main__":
     main()
