@@ -1,0 +1,32 @@
+name: SoDEX Spot Scanner
+
+on:
+  schedule:
+    - cron: '0 */12 * * *' # Runs every 12 hours
+  workflow_dispatch: # Allows you to run it manually for testing
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Scanner
+        run: python scanner.py
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "SodexBot"
+          git config --global user.email "bot@sodex.dev"
+          git add spot_market_stats.json
+          git commit -m "Automated Spot Update: $(date)" || exit 0
+          git push
