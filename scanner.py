@@ -7,6 +7,8 @@ getcontext().prec = 50
 
 # --- CONFIG ---
 START_ID = 1000
+SKIP_ID = 1001             # Always skip this ID
+ZERO_FEE_STOP_LIMIT = 100  # Stop script if 100 users in a row have 0 fees
 ADDRESS_API = "https://sodex.dev/mainnet/chain/user/"
 TRADE_URL = "https://mainnet-data.sodex.dev/api/v1/spot/trades"
 OUT_FILE = "spot_market_stats.json"
@@ -45,15 +47,20 @@ def main():
     upper_limit = find_upper_limit()
     active_prices = get_market_prices()
     results = {}
+    consecutive_zeros = 0 # Tracker for the circuit breaker
 
-    print(f"🎯 UPPER LIMIT: {upper_limit}. Starting Deep Sync...", flush=True)
+    print(f"🎯 UPPER LIMIT: {upper_limit}. Syncing IDs {START_ID} to {upper_limit}...", flush=True)
 
     for uid in range(START_ID, upper_limit + 1):
+        # 1. Hard Skip for 1001
+        if uid == SKIP_ID:
+            print(f"⏩ ID {uid} | Hard Skipped (Config)", flush=True)
+            continue
+
         addr = get_user_address_only(uid)
         if not addr: continue
         
-        # --- Real-time "I am starting this user" log ---
-        print(f"📡 Fetching ID {uid}...", end="", flush=True)
+        print(f"📡 ID {uid} ", end="", flush=True)
         
         vol, fees, trades_found, offset, limit = Decimal('0'), Decimal('0'), 0, 0, 100
         
@@ -69,29 +76,33 @@ def main():
                     vol += (Decimal(str(t['quantity'])) * p)
                     fees += (Decimal(str(t['fee'])) * p) if int(t.get('side', 1)) == 1 else Decimal(str(t['fee']))
                 
-                # --- HEARTBEAT PRINT ---
-                # This shows you it's still working on a "heavy" user
-                print(".", end="", flush=True) 
-                
+                print(".", end="", flush=True) # Heartbeat: 1 dot per 100 trades
                 offset += limit
                 if len(trades) < limit: break
             except: 
                 print("⚠️", end="", flush=True)
                 break
 
-        # Final result for the user
+        # 2. Logic for filtering and Circuit Breaker
         if trades_found > 0:
             if fees == 0:
-                print(f" ⏩ Skip (Team)", flush=True)
+                consecutive_zeros += 1
+                print(f" ⏩ Skip (Zero Fees) [Streak: {consecutive_zeros}]", flush=True)
             else:
+                consecutive_zeros = 0 # Reset streak because we found a real payer
                 results[addr] = {"id": uid, "vol": float(round(vol, 2)), "fee": float(round(fees, 4)), "ts": int(time.time())}
-                print(f" ✅ Vol: ${round(vol, 2)}", flush=True)
+                print(f" ✅ Saved | Fees: ${round(fees, 4)}", flush=True)
         else:
-            print(" 💨 No trades", flush=True)
+            print(" 💨 No Trades", flush=True)
+
+        # 3. Trigger Circuit Breaker
+        if consecutive_zeros >= ZERO_FEE_STOP_LIMIT:
+            print(f"\n🛑 CIRCUIT BREAKER: {ZERO_FEE_STOP_LIMIT} zero-fee users in a row. Ending script.", flush=True)
+            break
 
     with open(OUT_FILE, "w") as f:
         json.dump(results, f, indent=4)
-    print("🏁 Done!")
+    print(f"🏁 Done! Total users saved: {len(results)}")
 
 if __name__ == "__main__":
     main()
