@@ -1,29 +1,40 @@
-name: SoDEX Auto Scanner
+name: SoDEX Daily Spot Sync
 
 on:
   schedule:
-    - cron: '0 */12 * * *' # Every 12 hours
-  workflow_dispatch:      # Allows manual "Run" button in GitHub Actions
+    # This runs at 00:00 UTC every single day (24-hour cycle)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allows you to also run it manually click "Run workflow"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # This environment variable ensures you see the logs in REAL-TIME
+    env:
+      PYTHONUNBUFFERED: "1"
+
     permissions:
-      contents: write # Needed to push the JSON back to repo
+      contents: write # Needed to push the JSON file back to your repo
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies
+
+      - name: Install Dependencies
         run: pip install requests
-      - name: Run Script
+
+      - name: Run Sequential Scan
         run: python scanner.py
+
       - name: Commit and Push JSON
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add spot_market_stats.json
-          git commit -m "Auto-update Spot Stats: $(date)" || exit 0
+          git commit -m "Auto-update spot stats: $(date)" || echo "No changes to commit"
           git push
