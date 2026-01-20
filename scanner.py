@@ -7,29 +7,45 @@ getcontext().prec = 50
 
 # --- CONFIG ---
 START_ID = 1000
-ZERO_FEE_STOP_LIMIT = 100
-ADDRESS_URL = "https://sodex.dev/mainnet/chain/user/{}/address"
+ADDRESS_API = "https://sodex.dev/mainnet/chain/user/"
 TRADE_URL = "https://mainnet-data.sodex.dev/api/v1/spot/trades"
 OUT_FILE = "spot_market_stats.json"
 
-def get_upper_limit():
-    """Finds the actual highest User ID currently on the exchange."""
-    print("🔍 Finding the current upper limit...", flush=True)
-    high = START_ID
-    step = 500
-    # Jump forward until we hit a 404
-    while True:
-        try:
-            r = requests.get(ADDRESS_URL.format(high + step), timeout=5).json()
-            if r.get("code") == 0:
-                high += step
-            else:
-                if step <= 1: break
-                step //= 5 # Fine-tune the search
-        except:
-            break
-    print(f"📈 Upper limit found: {high + 100} (adding buffer)", flush=True)
-    return high + 100
+def get_user_address_only(user_id):
+    """Translation of your getUserAddressOnly function"""
+    try:
+        url = f"{ADDRESS_API}{user_id}/address"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("code") == 0 and data.get("data") and data["data"].get("address"):
+                return data["data"]["address"]
+    except:
+        pass
+    return None
+
+def find_upper_limit():
+    """Translation of your findUpperLimit Binary Search logic"""
+    print("🔍 Finding upper limit via Binary Search...", flush=True)
+    low = 1000
+    high = 10000 # Your Google Script used 10000
+    upper_limit = 1000
+    
+    while low <= high:
+        mid = (low + high) // 2
+        address = get_user_address_only(mid)
+        
+        if address:
+            upper_limit = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+            
+        # Small delay to mimic your API_DELAY
+        time.sleep(0.06) 
+    
+    print(f"✅ Found upper limit: {upper_limit}", flush=True)
+    return upper_limit
 
 def get_market_prices():
     try:
@@ -41,32 +57,32 @@ def get_market_prices():
     except: return {}
 
 def main():
-    # 1. Get Dynamic Limit
-    UPPER_LIMIT = get_upper_limit()
-    active_prices = get_market_prices()
+    # 1. Start exactly like your Google Script
+    upper_limit = find_upper_limit()
+    prices = get_market_prices()
     results = {}
-    consecutive_zeros = 0
-    
-    print(f"🚀 Starting Scan | IDs {START_ID} to {UPPER_LIMIT}", flush=True)
 
-    # 2. Sequential Scan
-    for uid in range(START_ID, UPPER_LIMIT + 1):
+    print(f"📍 Processing IDs 1000 to {upper_limit}...", flush=True)
+
+    # 2. Linear processing (One-by-one as you requested)
+    for uid in range(START_ID, upper_limit + 1):
         try:
-            resp = requests.get(ADDRESS_URL.format(uid), timeout=10).json()
-            if resp.get("code") != 0: continue 
+            addr = get_user_address_only(uid)
+            if not addr:
+                continue
             
-            addr = resp["data"]["address"]
             vol, fees, trades_found = Decimal('0'), Decimal('0'), 0
             offset, limit = 0, 100
             
+            # Fetch trades
             while True:
-                r = requests.get(f"{TRADE_URL}?account_id={uid}&limit={limit}&offset={offset}", timeout=15).json()
+                r = requests.get(f"{TRADE_URL}?account_id={uid}&limit={limit}&offset={offset}", timeout=10).json()
                 trades = r.get('data', [])
                 if not trades: break
                 
                 trades_found += len(trades)
                 for t in trades:
-                    p = active_prices.get(str(t['symbol_id'])) or Decimal(str(t.get('price', '0')))
+                    p = prices.get(str(t['symbol_id'])) or Decimal(str(t.get('price', '0')))
                     vol += (Decimal(str(t['quantity'])) * p)
                     fees += (Decimal(str(t['fee'])) * p) if int(t.get('side', 1)) == 1 else Decimal(str(t['fee']))
                 
@@ -74,26 +90,24 @@ def main():
                 if len(trades) < limit: break
             
             if trades_found > 0:
-                if fees == 0: consecutive_zeros += 1
-                else: consecutive_zeros = 0
-                
+                # SKIP logic for Team addresses ($0 fees)
+                if fees == 0:
+                    print(f"⏩ ID {uid} skipped (Zero Fees)", flush=True)
+                    continue
+                    
                 results[addr] = {
                     "id": uid, "vol": float(round(vol, 2)), 
                     "fee": float(round(fees, 4)), "ts": int(time.time())
                 }
-                print(f"✅ User {uid} | Vol: ${round(vol, 2)} | Fees: ${round(fees, 4)}", flush=True)
-            
-            if consecutive_zeros >= ZERO_FEE_STOP_LIMIT:
-                print(f"🛑 Stopped by fee circuit breaker at ID {uid}", flush=True)
-                break
+                print(f"✅ ID {uid} | Vol: ${round(vol, 2)} | Fees: ${round(fees, 4)}", flush=True)
 
         except Exception as e:
             print(f"⚠️ Error at {uid}: {e}", flush=True)
-            continue
 
+    # 3. Final Save
     with open(OUT_FILE, "w") as f:
         json.dump(results, f, indent=4)
-    print(f"🏁 Finished! Total Users: {len(results)}", flush=True)
+    print(f"🏁 DONE! Total users: {len(results)}", flush=True)
 
 if __name__ == "__main__":
     main()
